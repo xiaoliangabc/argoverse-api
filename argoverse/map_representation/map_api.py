@@ -378,23 +378,15 @@ class ArgoverseMap:
         npyimage_coords = npyimage_to_city_se2.transform_point_cloud(city_coords)
         npyimage_coords = npyimage_coords.astype(np.int64)
 
-        # index at (x,y) locations, which are (y,x) in the image
-        max_y = np.max(npyimage_coords[:, 1])
-        max_x = np.max(npyimage_coords[:, 0])
+        ground_height_values = np.full((npyimage_coords.shape[0]), np.nan)
+        ind_valid_pts = (npyimage_coords[:, 1] < ground_height_mat.shape[0]) * (
+            npyimage_coords[:, 0] < ground_height_mat.shape[1]
+        )
 
-        height_y, height_x = np.shape(ground_height_mat)
+        ground_height_values[ind_valid_pts] = ground_height_mat[
+            npyimage_coords[ind_valid_pts, 1], npyimage_coords[ind_valid_pts, 0]
+        ]
 
-        assert np.all(npyimage_coords[:, 1] > 0) and np.all(
-            npyimage_coords[:, 0] > 0
-        ), "Invalid coordinates, please make sure the query location is in a valid city coordinate"
-
-        if max_x > height_x or max_y > height_y:
-            # expand ground height npy image, fill with NaN
-            ground_height_mat_pad = np.full((max_y, max_x), np.nan)
-            ground_height_mat_pad[0:max_y, 0:max_x] = ground_height_mat
-            ground_height_mat = copy.deepcopy(ground_height_mat_pad)
-
-        ground_height_values = ground_height_mat[npyimage_coords[:, 1], npyimage_coords[:, 0]]
         return ground_height_values
 
     def append_height_to_2d_city_pt_cloud(self, pt_cloud_xy: np.ndarray, city_name: str) -> np.ndarray:
@@ -441,7 +433,16 @@ class ArgoverseMap:
         npyimage_coords = npyimage_coords.astype(np.int64)
 
         # index in at (x,y) locations, which are (y,x) in the image
-        layer_values = layer_raster_mat[npyimage_coords[:, 1], npyimage_coords[:, 0]]
+        layer_values = np.full((npyimage_coords.shape[0]), 0.0)
+        ind_valid_pts = (
+            (npyimage_coords[:, 1] > 0)
+            * (npyimage_coords[:, 1] < layer_raster_mat.shape[0])
+            * (npyimage_coords[:, 0] > 0)
+            * (npyimage_coords[:, 0] < layer_raster_mat.shape[1])
+        )
+        layer_values[ind_valid_pts] = layer_raster_mat[
+            npyimage_coords[ind_valid_pts, 1], npyimage_coords[ind_valid_pts, 0]
+        ]
         is_layer_boolean_arr = layer_values == 1.0
         return is_layer_boolean_arr
 
@@ -486,7 +487,7 @@ class ArgoverseMap:
             nearby_lane_ids = self.get_lane_ids_in_xy_bbox(
                 query_x, query_y, city_name, query_search_range_manhattan=search_radius
             )
-            if nearby_lane_ids is None:
+            if not nearby_lane_ids:
                 search_radius *= 2  # double search radius
             else:
                 break

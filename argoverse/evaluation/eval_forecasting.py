@@ -4,11 +4,13 @@
 
 import math
 import pickle as pkl
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from argoverse.map_representation.map_api import ArgoverseMap
+
+LOW_PROB_THRESHOLD_FOR_METRICS = 0.05
 
 
 def get_ade(forecasted_trajectory: np.ndarray, gt_trajectory: np.ndarray) -> float:
@@ -60,7 +62,8 @@ def get_displacement_errors_and_miss_rate(
     max_guesses: int,
     horizon: int,
     miss_threshold: float,
-) -> Tuple[float, float, float]:
+    forecasted_probabilities: Optional[Dict[int, List[float]]] = None,
+) -> Dict[str, float]:
     """Compute min fde and ade for each sample.
 
     Note: Both min_fde and min_ade values correspond to the trajectory which has minimum fde.
@@ -73,31 +76,59 @@ def get_displacement_errors_and_miss_rate(
         max_guesses: Number of guesses allowed
         horizon: Prediction horizon
         miss_threshold: Distance threshold for the last predicted coordinate
+        forecasted_probabilities: Probabilites associated with forecasted trajectories.
 
     Returns:
-        mean_min_ade: Min ade averaged over all the samples
-        mean_min_fde: Min fde averaged over all the samples
-        miss_rate: Mean number of misses
-
+        metric_results: Metric values for minADE, minFDE, MR, p-minADE, p-minFDE, p-MR
     """
-    min_ade = []
-    min_fde = []
-    n_misses = []
+    metric_results: Dict[str, float] = {}
+    min_ade, prob_min_ade = [], []
+    min_fde, prob_min_fde = [], []
+    n_misses, prob_n_misses = [], []
     for k, v in gt_trajectories.items():
         curr_min_ade = float("inf")
         curr_min_fde = float("inf")
-        for j in range(0, min(max_guesses, len(forecasted_trajectories[k]))):
-            fde = get_fde(forecasted_trajectories[k][j][:horizon], v[:horizon])
+        min_idx = 0
+        max_num_traj = min(max_guesses, len(forecasted_trajectories[k]))
+
+        # If probabilities available, use the most likely trajectories, else use the first few
+        if forecasted_probabilities is not None:
+            sorted_idx = np.argsort([-x for x in forecasted_probabilities[k]], kind="stable")
+            # sorted_idx = np.argsort(forecasted_probabilities[k])[::-1]
+            pruned_probabilities = [forecasted_probabilities[k][t] for t in sorted_idx[:max_num_traj]]
+            # Normalize
+            prob_sum = sum(pruned_probabilities)
+            pruned_probabilities = [p / prob_sum for p in pruned_probabilities]
+        else:
+            sorted_idx = np.arange(len(forecasted_trajectories[k]))
+        pruned_trajectories = [forecasted_trajectories[k][t] for t in sorted_idx[:max_num_traj]]
+
+        for j in range(len(pruned_trajectories)):
+            fde = get_fde(pruned_trajectories[j][:horizon], v[:horizon])
             if fde < curr_min_fde:
+                min_idx = j
                 curr_min_fde = fde
-                curr_min_ade = get_ade(forecasted_trajectories[k][j][:horizon], v[:horizon])
+        curr_min_ade = get_ade(pruned_trajectories[min_idx][:horizon], v[:horizon])
         min_ade.append(curr_min_ade)
         min_fde.append(curr_min_fde)
         n_misses.append(curr_min_fde > miss_threshold)
-    mean_min_ade = sum(min_ade) / len(min_ade)
-    mean_min_fde = sum(min_fde) / len(min_fde)
-    miss_rate = sum(n_misses) / len(n_misses)
-    return mean_min_ade, mean_min_fde, miss_rate
+
+        if forecasted_probabilities is not None:
+            prob_n_misses.append(1.0 if curr_min_fde > miss_threshold else (1.0 - pruned_probabilities[min_idx]))
+            prob_min_ade.append(
+                min(-np.log(pruned_probabilities[min_idx]), -np.log(LOW_PROB_THRESHOLD_FOR_METRICS)) + curr_min_ade
+            )
+            prob_min_fde.append(
+                min(-np.log(pruned_probabilities[min_idx]), -np.log(LOW_PROB_THRESHOLD_FOR_METRICS)) + curr_min_fde
+            )
+    metric_results["minADE"] = sum(min_ade) / len(min_ade)
+    metric_results["minFDE"] = sum(min_fde) / len(min_fde)
+    metric_results["MR"] = sum(n_misses) / len(n_misses)
+    if forecasted_probabilities is not None:
+        metric_results["p-minADE"] = sum(prob_min_ade) / len(prob_min_ade)
+        metric_results["p-minFDE"] = sum(prob_min_fde) / len(prob_min_fde)
+        metric_results["p-MR"] = sum(prob_n_misses) / len(prob_n_misses)
+    return metric_results
 
 
 def get_drivable_area_compliance(
@@ -140,7 +171,8 @@ def compute_forecasting_metrics(
     max_n_guesses: int,
     horizon: int,
     miss_threshold: float,
-) -> Tuple[float, float, float, float]:
+    forecasted_probabilities: Optional[Dict[int, List[float]]] = None,
+) -> Dict[str, float]:
     """Compute all the forecasting metrics.
 
     Args:
@@ -152,27 +184,20 @@ def compute_forecasting_metrics(
         max_n_guesses: Number of guesses allowed
         horizon: Prediction horizon
         miss_threshold: Miss threshold
+        forecasted_probabilities: Normalized Probabilities associated with each of the forecasted trajectories.
 
      Returns:
-        mean_min_ade: Mean of min_ade for all the trajectories.
-        mean_min_fde: Mean of min_fde for all the trajectories.
-        mean_dac: Mean drivable area compliance for all the trajectories.
-        miss_rate: Miss rate.
-
+        metric_results: Dictionary containing values for all metrics.
     """
-    mean_min_ade, mean_min_fde, miss_rate = get_displacement_errors_and_miss_rate(
-        forecasted_trajectories, gt_trajectories, max_n_guesses, horizon, miss_threshold
+    metric_results = get_displacement_errors_and_miss_rate(
+        forecasted_trajectories, gt_trajectories, max_n_guesses, horizon, miss_threshold, forecasted_probabilities
     )
-
-    mean_dac = get_drivable_area_compliance(forecasted_trajectories, city_names, max_n_guesses)
+    metric_results["DAC"] = get_drivable_area_compliance(forecasted_trajectories, city_names, max_n_guesses)
 
     print("------------------------------------------------")
     print(f"Prediction Horizon : {horizon}, Max #guesses (K): {max_n_guesses}")
     print("------------------------------------------------")
-    print(f"minADE: {mean_min_ade}")
-    print(f"minFDE: {mean_min_fde}")
-    print(f"DAC: {mean_dac}")
-    print(f"Miss Rate: {miss_rate}")
+    print(metric_results)
     print("------------------------------------------------")
 
-    return mean_min_ade, mean_min_fde, mean_dac, miss_rate
+    return metric_results
